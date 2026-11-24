@@ -1,0 +1,65 @@
+.env
+.ENV
+.Env
+*.env
+__pycache__/
+*.pyc
+*.pyo
+venv/
+env/
+*.log
+logs/
+jarvis_history.json
+whatsapp_browser_profile/
+telegram_contacts.json
+jarvis_memory.json
+jarvis_click_memory.json
+jarvis_watch_state.json
+jarvis_notes.txt
+telegram_command_pin.json
+telegram_command_offset.json
+.DS_Store
+Thumbs.db
+
+# --- Generated media (screenshots / photos / face data / QR / AI images) ---
+# Jarvis ke saare screenshots, camera photos, face enrollment samples,
+# QR codes, aur AI-generated images ab EK hi folder mein save hote hain
+# (config.MEDIA_DIR = "jarvis_media"), root mein bikhre hue nahi. Poora
+# folder yahan ignore hai, isliye "khud ko GitHub pe update kar do"
+# (push_update) bolne pe ye kabhi upload nahi hoga - sirf code jaayega.
+jarvis_media/
+# Purane naam se koi stray file reh gayi ho (safety net):
+*.png
+*.jpg
+*.jpeg
+
+# --- Build / venv / editor / large local-only stuff ---
+build/
+dist/
+*.spec.bak
+.vscode/
+.idea/
+node_modules/
+
+# --- Persistent browser profile (Jarvis ka automated browser - isme
+# YouTube/Google/koi bhi site ka login/cookies save rehte hain taaki
+# dobara sign-in na karna pade). Ye SENSITIVE hai (login sessions), kabhi
+# bhi GitHub pe nahi jaana chahiye.
+jarvis_browser_profile/
+
+# --- "work" folder: sab client/project files (html, png, jpg, pdf, docx,
+# koi bhi non-Jarvis-code file) yahan rakho. Ye poora folder git se
+# COMPLETELY ignore hai - isme jo bhi ho, wo kabhi commit/push/pull mein
+# touch nahi hota, isliye "local changes overwritten by merge" jaisi
+# error kabhi nahi aayegi. Jarvis ka asli code (skills/, *.py, etc.) is
+# folder ke bahar hi rehta hai jaisa pehle se hai.
+work/
+
+# --- Safety net: agar kabhi koi generated/project file "work/" ke bahar
+# root ya kisi skill folder mein galti se bach jaaye, ye bhi ignore
+# rahenge taaki wo bhi kabhi git conflict na de.
+*.html
+*.pdf
+*.docx
+*.xlsx
+*.pptx

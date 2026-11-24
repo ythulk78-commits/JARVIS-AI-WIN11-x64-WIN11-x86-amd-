@@ -1,0 +1,310 @@
+"""
+skills/youtube_control_skill.py
+------------------------------------------------------------
+Ek dedicated, PERSISTENT YouTube tab control karta hai (Playwright se).
+
+Flow: "youtube khol ke X play karo" -> yt_play chalega, ek tab khulega aur
+wahi tab yaad rakha jayega. Uske baad "isko like kar do", "subscribe kar do",
+"next karo", "pause karo" jaisi commands USI TAB pe chalengi - naya tab ya
+naya search nahi hoga jab tak khud dobara "play karo" na bolo.
+
+SETUP:
+  pip install playwright
+  playwright install chromium
+
+NOTE: Like/Subscribe ke liye jarvis jis Chromium profile mein YouTube khol
+raha hai, usme tumhara Google account login hona chahiye (ek baar manually
+login kar lo, phir wahi session persist rahega jab tak browser band na ho).
+
+THREADING FIX (zaroor padhna):
+Jarvis har command (bola ya type kiya) ek NAYE thread mein process karta
+hai (gui.py). Playwright ki sync API sirf usi thread se kaam karti hai
+jisne use start kiya - isliye "play karo" ek thread mein browser khole
+aur baad mein "pause karo"/"like karo" doosre (naye) thread se aaye to
+"Cannot switch to a different thread" crash hota tha. Ab saare Playwright
+calls `browser_worker.run_in_browser_thread(...)` ke zariye ek hi fixed
+background thread mein bhejte hain, chahe command kisi bhi thread se aaye.
+"""
+
+from browser_worker import run_in_browser_thread
+import browser_worker
+
+_page = None
+
+
+def _ensure_page():
+    """Chalu YouTube tab return karta hai. Agar band ho gaya ho ya kabhi
+    khula hi na ho, naya bana deta hai.
+
+    FIX (do-do YouTube window / signed-out problem): pehle ye function
+    apna khud ka ALAG Playwright Browser+Context bana leta tha (module-
+    level `_browser`/`_context` isi file mein), jo browser_worker.py ke
+    shared browser se BILKUL ALAG hota tha - matlab TEEN alag jagah se
+    browser khul sakta tha: actions.py ka webbrowser.open() (real signed-
+    in system browser), is skill ka apna khaali Playwright browser (kabhi
+    login nahi hota tha), aur browser_worker.py ka shared browser (web_agent/
+    browser_automation skills ke liye). Isi wajah se "play karo aur like
+    karo" jaisi command pe DO YouTube windows khulti thi, aur like/subscribe
+    us KHAALI (signed-out) wale browser mein try hoti thi jahan kabhi login
+    hi nahi tha - isliye fail ho jaata tha.
+
+    Ab is skill ka apna alag browser hai hi nahi - ye seedha
+    browser_worker ka SHARED, PERSISTENT (login-save-karne-wala) browser
+    use karta hai, ek naya tab khol ke, jaise web_agent_skill/
+    browser_automation_skill karte hain. Sirf ek hi browser instance
+    kabhi bhi khulta hai, aur login persistent profile mein save rehta
+    hai."""
+    global _page
+    if _page is not None:
+        try:
+            _ = _page.title()
+            return _page
+        except Exception:
+            _page = None
+
+    _page = browser_worker.new_tab()
+    return _page
+
+
+# ------------------------------------------------------------------
+# Internal implementations - ye sab sirf browser-worker thread ke
+# andar chalti hain (run_in_browser_thread ke zariye).
+# ------------------------------------------------------------------
+
+def _yt_search_impl(query: str) -> str:
+    """PROBLEM jo fix ho raha hai: yt_play seedha pehla video play kar deta
+    tha - lekin agar user sirf "search karo" bole (khud dekh ke choose
+    karna chahta ho), to seedha play karna galat hai. Ye function sirf
+    search RESULTS PAGE tak le jaata hai, koi video click/play nahi karta -
+    baaki yt_* commands (like/subscribe/next) isi tab pe kaam karte rahenge
+    jaise hi user koi video khud click kare ya 'X play karo' bole."""
+    page = _ensure_page()
+    page.goto(f"https://www.youtube.com/results?search_query={query}", timeout=20000)
+    page.wait_for_selector("ytd-video-renderer a#video-title", timeout=10000)
+    return f"YouTube pe '{query}' search kar diya - results dikh rahe hain."
+
+
+def _yt_play_impl(query: str) -> str:
+    page = _ensure_page()
+    page.goto(f"https://www.youtube.com/results?search_query={query}", timeout=20000)
+    video = page.wait_for_selector("ytd-video-renderer a#video-title", timeout=10000)
+    video.click()
+    page.wait_for_timeout(2500)
+    try:
+        skip = page.wait_for_selector(
+            ".ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-skip-button-container",
+            timeout=3000,
+        )
+        if skip:
+            skip.click()
+    except Exception:
+        pass
+    return f"'{query}' play kar raha hoon YouTube pe."
+
+
+def _yt_like_impl() -> str:
+    if _page is None:
+        return "Pehle koi video play karo, phir like karna."
+    # state="attached" use kiya hai "visible" ki jagah - YouTube ka like
+    # button kabhi player-overlay ki wajah se Playwright ko "visible" nahi
+    # dikhta jab tak use hover/scroll na kiya jaye, jisse pehle timeout
+    # ho jaata tha even though button DOM mein maujood aur clickable hota hai.
+    btn = _page.wait_for_selector(
+        "ytd-menu-renderer #segmented-like-button button, button[aria-label*='like this video' i]",
+        timeout=8000,
+        state="attached",
+    )
+    btn.scroll_into_view_if_needed()
+    if (btn.get_attribute("aria-pressed") or "").lower() == "true":
+        return "Ye video already liked hai."
+    try:
+        btn.click(timeout=5000)
+    except Exception:
+        # Normal click fail ho (overlay/covered element) to seedha DOM
+        # click event fire karo - ye visibility check ko bypass kar deta hai.
+        btn.evaluate("el => el.click()")
+    return "Video like kar diya!"
+
+
+def _yt_subscribe_impl() -> str:
+    if _page is None:
+        return "Pehle koi video play karo, phir subscribe karna."
+    btn = _page.wait_for_selector(
+        "ytd-subscribe-button-renderer button, #subscribe-button button",
+        timeout=8000,
+        state="attached",
+    )
+    btn.scroll_into_view_if_needed()
+    if "subscribed" in (btn.inner_text() or "").strip().lower():
+        return "Ye channel already subscribed hai."
+    try:
+        btn.click(timeout=5000)
+    except Exception:
+        btn.evaluate("el => el.click()")
+    return "Channel subscribe kar diya!"
+
+
+def _yt_pause_resume_impl() -> str:
+    if _page is None:
+        return "Koi video khula hi nahi hai."
+    _page.keyboard.press("k")
+    return "Play/pause toggle kar diya."
+
+
+def _yt_next_impl() -> str:
+    if _page is None:
+        return "Koi video khula hi nahi hai."
+    _page.keyboard.press("shift+N")
+    return "Next video pe gaya."
+
+
+def _yt_mute_toggle_impl() -> str:
+    if _page is None:
+        return "Koi video khula hi nahi hai."
+    _page.keyboard.press("m")
+    return "Mute/unmute toggle kar diya."
+
+
+def _yt_fullscreen_toggle_impl() -> str:
+    if _page is None:
+        return "Koi video khula hi nahi hai."
+    _page.keyboard.press("f")
+    return "Fullscreen toggle kar diya."
+
+
+def _yt_close_impl() -> str:
+    """Sirf is skill ka yaad rakha hua YouTube tab reference clear karta
+    hai (agli baar 'play karo' bolne pe naya tab khulega). Poora shared
+    browser band karna ho to browser_worker.close_all_browsers() use
+    karo (jo browser_automation/web_agent skills bhi share karte hain).
+    NOTE: ye function khud hamesha already browser-worker thread ke
+    andar hi chalta hai (yt_close() se run_in_browser_thread ke zariye),
+    isliye yahan se dobara run_in_browser_thread call NAHI karte -
+    (nested call se worker thread deadlock ho jaata, kyunki wo ek
+    time pe sirf ek hi job process karta hai)."""
+    global _page
+    if _page is not None:
+        try:
+            _page.close()
+        except Exception:
+            pass
+    _page = None
+    return "YouTube tab band kar diya."
+
+
+# ------------------------------------------------------------------
+# Public ACTIONS - ye kisi bhi thread se call ho sakte hain, andar se
+# hamesha browser-worker thread pe hi kaam hota hai.
+# ------------------------------------------------------------------
+
+def yt_search(params: dict) -> str:
+    query = params.get("query", "").strip()
+    if not query:
+        return "Kya search karna hai, naam batao."
+    try:
+        return run_in_browser_thread(lambda: _yt_search_impl(query))
+    except Exception as e:
+        return f"Search nahi ho saka: {e}"
+
+
+def yt_play(params: dict) -> str:
+    query = params.get("query", "").strip()
+    if not query:
+        return "Kya play karna hai, naam batao."
+    try:
+        return run_in_browser_thread(lambda: _yt_play_impl(query))
+    except Exception as e:
+        return f"Play nahi ho saka: {e}"
+
+
+def yt_like(params: dict) -> str:
+    try:
+        return run_in_browser_thread(_yt_like_impl)
+    except Exception as e:
+        return f"Like nahi ho saka (login check karo): {e}"
+
+
+def yt_subscribe(params: dict) -> str:
+    try:
+        return run_in_browser_thread(_yt_subscribe_impl)
+    except Exception as e:
+        return f"Subscribe nahi ho saka (login check karo): {e}"
+
+
+def yt_pause_resume(params: dict) -> str:
+    try:
+        return run_in_browser_thread(_yt_pause_resume_impl)
+    except Exception as e:
+        return f"Nahi ho saka: {e}"
+
+
+def yt_next(params: dict) -> str:
+    try:
+        return run_in_browser_thread(_yt_next_impl)
+    except Exception as e:
+        return f"Nahi ho saka: {e}"
+
+
+def yt_mute_toggle(params: dict) -> str:
+    try:
+        return run_in_browser_thread(_yt_mute_toggle_impl)
+    except Exception as e:
+        return f"Nahi ho saka: {e}"
+
+
+def yt_fullscreen_toggle(params: dict) -> str:
+    try:
+        return run_in_browser_thread(_yt_fullscreen_toggle_impl)
+    except Exception as e:
+        return f"Nahi ho saka: {e}"
+
+
+def yt_close(params: dict) -> str:
+    try:
+        return run_in_browser_thread(_yt_close_impl)
+    except Exception as e:
+        return f"Nahi ho saka: {e}"
+
+
+ACTIONS = {
+    "yt_search": yt_search,
+    "yt_play": yt_play,
+    "yt_like": yt_like,
+    "yt_subscribe": yt_subscribe,
+    "yt_pause_resume": yt_pause_resume,
+    "yt_next": yt_next,
+    "yt_mute_toggle": yt_mute_toggle,
+    "yt_fullscreen_toggle": yt_fullscreen_toggle,
+    "yt_close": yt_close,
+}
+
+DOCS = """
+- yt_search: {"query": "lofi song"}
+    (YouTube pe search kar ke sirf RESULTS PAGE tak le jaata hai - koi video
+    auto-play NAHI karta. Use tab jab user sirf "search karo"/"dhundo" bole,
+    khud dekh ke choose karna chahta ho. Isi tab pe baad mein "pehla wala
+    play karo" bhi bol sakte ho (click_on_screen use hoga uske liye).)
+- yt_play: {"query": "lofi song"}
+    (YouTube khol ke pehla result play karta hai. Ye tab yaad rakha jaata
+    hai - isके baad wale yt_* commands isi tab pe chalte hain.)
+- yt_like: {}  (chalu tab ke video ko like karta hai)
+- yt_subscribe: {}  (chalu tab ke channel ko subscribe karta hai)
+- yt_pause_resume: {}  (play/pause toggle)
+- yt_next: {}  (agla video)
+- yt_mute_toggle: {}  (mute/unmute)
+- yt_fullscreen_toggle: {}  (fullscreen on/off)
+- yt_close: {}  (YouTube tab/browser band karo)
+
+Example:
+User: "youtube pe lofi gaana search karo"
+-> {"actions": [{"action": "yt_search", "params": {"query": "lofi song"}}]}
+
+User: "youtube khol ke koi lofi gaana play karo"
+-> {"actions": [{"action": "yt_play", "params": {"query": "lofi song"}}]}
+
+(usi conversation ke aage) User: "ise like kar do"
+-> {"actions": [{"action": "yt_like", "params": {}}]}
+
+User: "channel subscribe kar do"
+-> {"actions": [{"action": "yt_subscribe", "params": {}}]}
+"""
